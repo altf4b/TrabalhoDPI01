@@ -1,17 +1,22 @@
+require("dotenv").config(); 
 const express = require("express");
 const http_errors = require("http-errors");
 const knex = require("knex")
+const passport = require("./config/passport");
+const jwt = require("jsonwebtoken");
+// proteção de rotas
+const authMiddleware = require("./middlewares/auth");
 //  repositórios
 const CoisaRepository = require("./repositories/CoisaRepository");
 const EmprestimoRepository = require("./repositories/EmprestimoRepository");
 const TagRepository = require("./repositories/TagRepository");
 
-const PORT = 8001
-const HOSTNAME = "localhost"
+const PORT = process.env.PORT || 8001;
+const HOSTNAME = process.env.HOSTNAME || "localhost";
 
-const api = express()
-api.use( express.json() )
-api.use( express.urlencoded( { extended : true } ) )
+const api = express();
+api.use(express.json());
+api.use(express.urlencoded({ extended: true }));
 
 const conn = knex({
     client: "mysql",
@@ -22,88 +27,106 @@ const conn = knex({
         database: "material"
     }
 });
+// Inicialização do módulo Passport no Express
+api.use(passport.initialize());
+
+// ==========================================
+// ENDPOINTS DE AUTENTICAÇÃO PÚBLICOS
+// ==========================================
+
+// Rota que redireciona o cliente para a tela de consentimento do Google
+api.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"], session: false }));
+
+api.get(
+    "/auth/google/callback",
+    passport.authenticate("google", { failureRedirect: "/auth/falha", session: false }),
+    (req, res) => {
+        // Geração do Token JWT baseado nos dados obtidos pelo perfil do Google
+        const token = jwt.sign(
+            { id: req.user.googleId, nome: req.user.nome, email: req.user.email },
+            process.env.JWT_SECRET,
+            { expiresIn: "8h" } 
+        );
+
+        // Retorna a confirmação e o token para ser usado nos cabeçalhos HTTP subsequentes
+        res.status(200).json({
+            mensagem: "Autenticação realizada com sucesso!",
+            token: token,
+            usuario: req.user
+        });
+    }
+);
+
+api.get("/auth/falha", (req, res) => {
+    res.status(401).json({ erro: "Falha na validação de credenciais via Google OAuth." });
+});
 
 // ==========================================
 // ROTAS GET (VISUALIZAÇÃO)
 // ==========================================
 
 // GET - visualizar coisas
+api.use(authMiddleware);
+
 api.get("/coisas", async (req, res) => {
     try {
-        const coisas = await conn("coisas");
+        const coisas = await CoisaRepository.findAll();
         res.status(200).json(coisas);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar as coisas." });
     }
 });
-
 // GET - jogos
 api.get("/jogos", async (req, res) => {
     try {
-        const jogos = await conn("coisas").where("tipo", "jogo");
+        const jogos = await CoisaRepository.findByTipo("jogo");
         res.status(200).json(jogos);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar os jogos." });
     }
 });
-
 // GET - objetos
 api.get("/objetos", async (req, res) => {
     try {
-        const objetos = await conn("coisas").where("tipo", "objeto");
+        const objetos = await CoisaRepository.findByTipo("objeto");
         res.status(200).json(objetos);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar os objetos." });
     }
 });
-
 // GET - livros
 api.get("/livros", async (req, res) => {
     try {
-        const livros = await conn("coisas").where("tipo", "livro");
+        const livros = await CoisaRepository.findByTipo("livro");
         res.status(200).json(livros);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar os livros." });
     }
 });
-
 // GET - emprestimos
 api.get("/emprestimos", async (req, res) => {
     try {
-        const emprestimos = await conn("emprestimos")
-            .join("coisas", "emprestimos.coisa_id", "coisas.id")
-            .select(
-                "emprestimos.id",
-                "coisas.nome",
-                "emprestimos.nome_pessoa",
-                "emprestimos.data_emprestimo",
-                "emprestimos.data_devolucao",
-                "emprestimos.status"
-            );
-
+        const emprestimos = await EmprestimoRepository.findAllWithCoisas();
         res.status(200).json(emprestimos);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar empréstimos." });
     }
 });
-
 // GET - listar todas as tags globais 
 api.get("/tags", async (req, res) => {
     try {
-        const tags = await conn("tags").select("*");
+        const tags = await TagRepository.findAll();
         res.status(200).json(tags);
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao buscar as tags." });
     }
 });
-
-
 // ==========================================
 // ROTAS POST (CRIAÇÃO / CADASTRO)
 // ==========================================
@@ -111,55 +134,19 @@ api.get("/tags", async (req, res) => {
 // POST - coisas 
 api.post("/coisas", async (req, res) => {
     try {
-
         const { nome, tipo, estado_conservacao, tags } = req.body;
 
         if (!nome || !tipo) {
-            return res.status(400).json({
-                erro: "Nome e tipo são obrigatórios."
-            });
+            return res.status(400).json({ erro: "Nome e tipo são obrigatórios." });
         }
 
-        await conn.transaction(async (trx) => {
-            
-
-            const [coisa_id] = await trx("coisas").insert({ 
-                nome, 
-                tipo,
-                estado_conservacao: estado_conservacao || "Bom"
-            });
-
-
-            if (tipo === "jogo") {
-                await trx("jogos").insert({ coisa_id });
-            } else if (tipo === "livro") {
-                await trx("livros").insert({ coisa_id });
-            } else if (tipo === "objeto") {
-                await trx("objetos").insert({ coisa_id });
-            } else {
-                throw new Error("Tipo de item inválido fornecido.");
-            }
-
-
-            if (tags && Array.isArray(tags) && tags.length > 0) {
-                const vinculoTags = tags.map(tag_id => ({
-                    coisa_id,
-                    tag_id
-                }));
-                await trx("coisa_tags").insert(vinculoTags);
-            }
-        });
-
-        res.status(201).json({
-            mensagem: "Item, subcategoria e tags cadastrados com sucesso!"
-        });
-
+        await CoisaRepository.create({ nome, tipo, estado_conservacao, tags });
+        res.status(201).json({ mensagem: "Item, subcategoria e tags cadastrados com sucesso!" });
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao cadastrar o item." });
     }
 });
-
 // POST - realizar novo empréstimo 
 api.post("/emprestimos", async (req, res) => {
     try {
@@ -171,45 +158,29 @@ api.post("/emprestimos", async (req, res) => {
             });
         }
 
-        await conn("emprestimos").insert({
-            coisa_id,
-            nome_pessoa,
-            data_emprestimo,
-            status: "emprestado"
-        });
-
-        res.status(201).json({
-            mensagem: "Empréstimo registrado com sucesso!"
-        });
+        await EmprestimoRepository.create({ coisa_id, nome_pessoa, data_emprestimo });
+        res.status(201).json({ mensagem: "Empréstimo registrado com sucesso!" });
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao registrar o empréstimo." });
     }
 });
-
 // POST - cadastrar uma nova tag global 
 api.post("/tags", async (req, res) => {
     try {
         const { nome } = req.body;
 
         if (!nome) {
-            return res.status(400).json({
-                erro: "O nome da tag é obrigatório."
-            });
+            return res.status(400).json({ erro: "O nome da tag é obrigatório." });
         }
 
-        await conn("tags").insert({ nome });
-
-        res.status(201).json({
-            mensagem: "Tag global criada com sucesso!"
-        });
+        await TagRepository.create(nome);
+        res.status(201).json({ mensagem: "Tag global criada com sucesso!" });
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao criar a tag." });
     }
 });
-
-
 // ==========================================
 // ROTAS PUT (ATUALIZAÇÃO)
 // ==========================================
@@ -220,98 +191,62 @@ api.put("/coisas/:id", async (req, res) => {
         const { id } = req.params;
         const { nome, tipo, estado_conservacao } = req.body;
 
-        await conn("coisas")
-            .where({ id })
-            .update({ nome, tipo, estado_conservacao });
-
-        res.status(200).json({
-            mensagem: "Item atualizado com sucesso!"
-        });
-
+        await CoisaRepository.update(id, { nome, tipo, estado_conservacao });
+        res.status(200).json({ mensagem: "Item atualizado com sucesso!" });
     } catch (erro) {
         console.log(erro);
         res.status(500).json({ erro: "Erro ao atualizar o item." });
     }
 });
-
 // PUT - devolver empréstimo
 api.put("/emprestimos/:id", async (req, res) => {
     try {
         const { id } = req.params;
-
-        const atualizado = await conn("emprestimos")
-            .where({ id })
-            .update({
-                status: "devolvido",
-                data_devolucao: new Date() 
-            });
+        const atualizado = await EmprestimoRepository.returnItem(id);
             
         if (!atualizado) {
-            return res.status(404).json({
-                erro: "Empréstimo não encontrado"
-            });
+            return res.status(404).json({ erro: "Empréstimo não encontrado" });
         }
-        res.status(200).json({
-            mensagem: "Item devolvido com sucesso!"
-        });
-
+        res.status(200).json({ mensagem: "Item devolvido com sucesso!" });
     } catch (erro) {
         console.log(erro);
-        res.status(500).json({
-            erro: "Erro ao devolver o item."
-        });
+        res.status(500).json({ erro: "Erro ao devolver o item." });
     }
 });
-
-
 // ==========================================
 // ROTAS DELETE (EXCLUSÃO)
 // ==========================================
 
 // DELETE - coisas
-api.delete("/coisas/:id", (req, res, next) => {
-    const id = req.params.id;
-    conn("coisas")
-        .where("id", id)
-        .del()
-        .then((dados) => {
-            if (!dados) {
-                return res.status(404).json({
-                    erro: "Item não encontrado"
-                });
-            }
-            res.status(200).json({
-                mensagem: "Item excluído com sucesso!"
-            });
-        })
-        .catch(next);
+api.delete("/coisas/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const deletado = await CoisaRepository.delete(id);
+        
+        if (!deletado) {
+            return res.status(404).json({ erro: "Item não encontrado" });
+        }
+        res.status(200).json({ mensagem: "Item excluído com sucesso!" });
+    } catch (erro) {
+        console.log(erro);
+        res.status(500).json({ erro: "Erro ao excluir o item." });
+    }
 });
-
 // DELETE - empréstimos
 api.delete("/emprestimos/:id", async (req, res) => {
     try {
         const { id } = req.params;
-        const deletado = await conn("emprestimos")
-            .where({ id })
-            .del();
+        const deletado = await EmprestimoRepository.delete(id);
 
         if (!deletado) {
-            return res.status(404).json({
-                erro: "Empréstimo não encontrado"
-            });
+            return res.status(404).json({ erro: "Empréstimo não encontrado" });
         }
-        res.status(200).json({
-            mensagem: "Empréstimo removido com sucesso!"
-        });
-
+        res.status(200).json({ mensagem: "Empréstimo removido com sucesso!" });
     } catch (erro) {
         console.log(erro);
-        res.status(500).json({
-            erro: "Erro ao deletar empréstimo."
-        });
+        res.status(500).json({ erro: "Erro ao deletar empréstimo." });
     }
 });
-
 
 api.listen(PORT, HOSTNAME, () => {
     console.log(`Servidor rodando em http://${HOSTNAME}:${PORT}`);
