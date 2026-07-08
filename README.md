@@ -55,7 +55,7 @@ Aplicação rodando em: `http://localhost:8001`
 5. Vá para `Credenciais` > `Criar credenciais` > `ID do cliente OAuth`.
 6. Tipo de aplicativo: `Aplicativo da Web`.
 7. Em `URIs de redirecionamento autorizados`, adicione:
-* `http://localhost:8001/auth/google/callback`
+* `http://localhost:8001/auth/google/`
 
 
 8. Salve e copie o `Client ID` e o `Client Secret`.
